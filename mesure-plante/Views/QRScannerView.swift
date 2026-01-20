@@ -118,8 +118,8 @@ struct QRScannerView: View {
                 showSuccess = true
             }
 
-            // Passer à l'écran AR après un délai
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            // Passer à l'écran AR après un court délai
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 scannedData = data
             }
         } else {

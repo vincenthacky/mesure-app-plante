@@ -81,9 +81,14 @@ final class ARManager: NSObject, ObservableObject {
 
     /// Appelé quand le QR Code est détecté visuellement (depuis la caméra)
     func setQRCodeAsOrigin() {
+        // Si la position caméra n'est pas encore disponible, réessayer après un court délai
         guard let currentPosition = getCurrentCameraPosition(),
               let currentTransform = getCurrentCameraTransform() else {
-            statusMessage = "Position caméra non disponible"
+            statusMessage = "Initialisation de la caméra..."
+            // Réessayer après 0.3 secondes
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.setQRCodeAsOrigin()
+            }
             return
         }
 

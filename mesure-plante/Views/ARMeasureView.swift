@@ -69,62 +69,63 @@ struct ARMeasureView: View {
                 Spacer()
 
                 VStack(spacing: 20) {
-                // Icône
-                Image(systemName: "qrcode.viewfinder")
-                    .font(.system(size: 60))
-                    .foregroundStyle(.green)
+                    // Icône
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.system(size: 60))
+                        .foregroundStyle(.green)
 
-                // Titre
-                VStack(spacing: 8) {
-                    Text("Calibration requise")
-                        .font(.title2)
-                        .fontWeight(.bold)
+                    // Titre
+                    VStack(spacing: 8) {
+                        Text("Calibration requise")
+                            .font(.title2)
+                            .fontWeight(.bold)
 
-                    Text("Pointez la caméra vers le QR Code\n« \(qrData.nom) »")
-                        .font(.subheadline)
-                        .multilineTextAlignment(.center)
+                        Text("Pointez la caméra vers le QR Code\n« \(qrData.nom) »")
+                            .font(.subheadline)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Info données existantes
+                    if arManager.hasExistingData {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.blue)
+                            Text("\(arManager.savedPointsCount) points sauvegardés seront restaurés")
+                                .font(.caption)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.blue.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    // Bouton calibrer
+                    Button(action: calibrateQRCode) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "scope")
+                            Text("Calibrer maintenant")
+                                .fontWeight(.semibold)
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 32)
+                        .padding(.vertical, 16)
+                        .background(Color.green)
+                        .clipShape(Capsule())
+                    }
+                    .padding(.top, 8)
+
+                    Text("Appuyez quand le QR Code est bien visible")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .padding(32)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+                .padding()
 
-                // Info données existantes
-                if arManager.hasExistingData {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.blue)
-                        Text("\(arManager.savedPointsCount) points sauvegardés seront restaurés")
-                            .font(.caption)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(Color.blue.opacity(0.15))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-
-                // Bouton calibrer
-                Button(action: calibrateQRCode) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "scope")
-                        Text("Calibrer maintenant")
-                            .fontWeight(.semibold)
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 32)
-                    .padding(.vertical, 16)
-                    .background(Color.green)
-                    .clipShape(Capsule())
-                }
-                .padding(.top, 8)
-
-                Text("Appuyez quand le QR Code est bien visible")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer()
             }
-            .padding(32)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 24))
-            .padding()
-
-            Spacer()
         }
     }
 
