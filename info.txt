@@ -1,0 +1,248 @@
+ TECHNOLOGIES À UTILISER
+
+Langage : Swift
+Framework AR : ARKit
+Interface : SwiftUI ou UIKit (au choix)
+Scan QR Code : AVFoundation + Vision
+Stockage : Pas de persistance (données perdues à la fermeture)
+
+
+📋 FONCTIONNALITÉS DÉTAILLÉES
+1. Scanner QR Code au démarrage
+Comportement :
+
+Ouvrir la caméra pour scanner un QR Code
+Le QR Code contient :
+
+json{
+  "id": "123",
+  "nom": "Plantation-aka",
+  "lat": 6.5,
+  "lon": -3.4
+}
+```
+- Valider le format JSON (vérifier présence de `id`, `nom`, `lat`, `lon`)
+- Si invalide → afficher erreur et permettre de rescanner
+- Si valide → passer à l'écran AR
+
+**Note :** Les coordonnées GPS ne sont utilisées QUE pour l'information, pas pour la localisation.
+
+---
+
+### 2. Écran AR avec mesure en temps réel
+
+**Interface :**
+```
+┌─────────────────────────────────┐
+│  📍 Réf: Plantation-aka         │  ← HUD overlay
+│  📏 Distance: 3.24 m            │
+│  🎯 Surfaces: 3                 │
+│  🌱 Points placés: 5            │
+├─────────────────────────────────┤
+│                                 │
+│    [VUE AR ARKIT EN DIRECT]     │
+│                                 │
+│  • Nuage de points détectés     │
+│  • Sphères vertes = arbres      │
+│  • Plans détectés (grille)      │
+│                                 │
+├─────────────────────────────────┤
+│   [Bouton: 🌳 Placer Point]    │
+└─────────────────────────────────┘
+```
+
+**Ce qui s'affiche :**
+- Vue caméra AR en temps réel
+- HUD transparent avec :
+  - Nom du point de référence actuel
+  - Distance depuis la dernière référence
+  - Nombre de surfaces détectées par ARKit
+  - Nombre de points placés
+- Bouton pour placer un nouveau point
+
+---
+
+### 3. Placement de points avec ARKit
+
+**Fonctionnement :**
+
+1. ARKit détecte automatiquement les surfaces (sol)
+2. L'utilisateur se déplace librement
+3. ARKit calcule automatiquement la position 3D de la caméra
+4. Le HUD affiche la distance en temps réel
+5. Quand l'utilisateur appuie sur "Placer Point" :
+   - ARKit crée un `ARAnchor` à l'emplacement actuel
+   - Une sphère verte 3D apparaît à cet endroit
+   - Le point devient la nouvelle référence
+   - La distance se réinitialise à 0.00m
+6. L'utilisateur peut continuer à placer d'autres points
+
+**Important :** 
+- Chaque nouveau point devient automatiquement la référence pour les mesures suivantes
+- Les points restent visibles dans l'espace tant que l'app est ouverte
+- ARKit garde les points ancrés même si tu bouges, tournes, ou marches autour
+
+---
+
+### 4. Chaînage des références
+```
+QR Code scanné (Référence 0)
+    ↓
+[Marche 3.5m]
+    ↓
+Place Point 1 → devient Référence 1 (distance reset à 0m)
+    ↓
+[Marche 2.8m]
+    ↓
+Place Point 2 → devient Référence 2 (distance reset à 0m)
+    ↓
+[Marche 4.1m]
+    ↓
+Place Point 3 → devient Référence 3 (distance reset à 0m)
+```
+
+---
+
+### 5. Affichage visuel 3D
+
+**Dans la vue AR, afficher :**
+
+1. **Nuage de points ARKit** : Points jaunes/blancs montrant ce qu'ARKit détecte
+2. **Plans détectés** : Grille semi-transparente sur le sol
+3. **Sphères vertes** : Une sphère verte de ~10cm à chaque point d'arbre placé
+4. **Labels 3D** : Au-dessus de chaque sphère, afficher "Arbre 1", "Arbre 2", etc.
+5. **Ligne de mesure** : Une ligne en 3D entre la caméra et le dernier point de référence
+
+---
+
+## 🔧 ARCHITECTURE TECHNIQUE
+
+### Structure des fichiers
+```
+PlantationTracker/
+├── Models/
+│   ├── QRCodeData.swift          → Structure du QR Code
+│   └── PlantPoint.swift          → Structure d'un point placé
+│
+├── Managers/
+│   ├── ARManager.swift           → Gestion ARKit (session, ancres, calculs)
+│   └── QRCodeManager.swift       → Scanner QR Code
+│
+├── Views/
+│   ├── QRScannerView.swift       → Écran scan QR Code
+│   ├── ARMeasureView.swift       → Écran principal AR
+│   └── HUDOverlay.swift          → HUD overlay (distance, infos)
+│
+└── Utils/
+    └── HapticManager.swift       → Vibrations
+```
+
+---
+
+## 📊 FLUX DE L'APPLICATION
+
+### Au démarrage
+
+1. Lancer l'app → afficher QRScannerView
+2. Scanner QR Code → valider JSON
+3. Si valide → passer à ARMeasureView
+
+### Dans ARMeasureView
+
+1. Démarrer la session ARKit
+2. ARKit commence à détecter les surfaces
+3. Afficher le HUD avec infos en temps réel
+4. L'utilisateur se déplace → distance mise à jour automatiquement
+5. L'utilisateur appuie sur "Placer Point" :
+   - Hit test au centre de l'écran
+   - Créer un ARAnchor sur le plan détecté
+   - Dessiner une sphère verte à cet endroit
+   - Vibration + message "Point X placé"
+   - Ce point devient la nouvelle référence
+   - Réinitialiser la distance à 0m
+6. Répéter 5 autant de fois que nécessaire
+
+### En se déplaçant
+
+- ARKit suit automatiquement la position de la caméra
+- Les sphères vertes restent fixées dans l'espace réel
+- Si tu reviens vers un point précédent, la sphère est toujours au même endroit
+- Le HUD affiche toujours la distance depuis la dernière référence
+
+---
+
+## ⚙️ CONFIGURATION ARKIT
+
+### Session ARKit à utiliser
+
+**ARWorldTrackingConfiguration** avec :
+- Détection de plans horizontaux (le sol)
+- Pas besoin de plans verticaux
+- Pas besoin de détection d'images
+- Pas besoin de détection de personnes
+
+### Précision
+
+ARKit sur iPhone donne une précision de **1 à 5 centimètres** en conditions normales.
+
+---
+
+## 🎨 ÉLÉMENTS VISUELS
+
+### HUD (Overlay transparent)
+
+Afficher en haut de l'écran :
+- `📍 Réf: [nom du point de référence]`
+- `📏 Distance: [X.XX] m`
+- `🎯 Surfaces: [nombre]`
+- `🌱 Points placés: [nombre]`
+
+### Marqueurs 3D
+
+Pour chaque point placé, dessiner :
+- Une sphère verte de 10cm de rayon
+- Un label 3D au-dessus : "Arbre 1", "Arbre 2", etc.
+- (Optionnel) Une ligne reliant le point à la caméra
+
+### Feedback utilisateur
+
+Quand un point est placé :
+- Vibration haptique (succès)
+- Message toast : "✅ Arbre X placé à Y.YYm"
+- Animation rapide (flash ou zoom)
+
+---
+
+## 📝 DONNÉES À STOCKER EN MÉMOIRE
+
+### Pendant l'utilisation (RAM uniquement)
+```
+- QR Code de référence :
+  { id, nom, lat, lon }
+
+- Point de référence actuel :
+  Soit le QR Code, soit le dernier point placé
+
+- Liste des points placés :
+  [
+    { id: 1, nom: "Arbre 1", anchor: ARAnchor, position: (x,y,z) },
+    { id: 2, nom: "Arbre 2", anchor: ARAnchor, position: (x,y,z) },
+    ...
+  ]
+
+- Position actuelle de la caméra (fournie par ARKit)
+Important : Quand l'app se ferme → toutes ces données sont perdues. C'est voulu pour cette version.
+
+✅ CRITÈRES DE SUCCÈS
+L'application doit permettre de :
+
+✅ Scanner un QR Code et valider son format JSON
+✅ Afficher une vue AR en temps réel
+✅ Détecter automatiquement les surfaces avec ARKit
+✅ Mesurer la distance en temps réel depuis la dernière référence
+✅ Placer un point en créant un ARAnchor
+✅ Afficher visuellement les points placés (sphères 3D)
+✅ Utiliser chaque nouveau point comme référence
+✅ Garder les points ancrés dans l'espace réel
+✅ Afficher les informations dans un HUD clair
+✅ Fonctionner sans Internet ni GPS
