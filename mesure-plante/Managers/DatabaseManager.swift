@@ -88,6 +88,8 @@ final class DatabaseManager {
 
     /// Insère ou met à jour une session
     func saveSession(_ session: PlantSession) {
+        print("💾 [DB] saveSession() appelé - QR ID: '\(session.qrCodeId)', Nom: '\(session.plantationName)'")
+
         let sql = """
         INSERT OR REPLACE INTO sessions (id, qr_code_id, plantation_name, latitude, longitude, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?);
@@ -95,54 +97,79 @@ final class DatabaseManager {
 
         var statement: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, session.id.uuidString, -1, nil)
-            sqlite3_bind_text(statement, 2, session.qrCodeId, -1, nil)
-            sqlite3_bind_text(statement, 3, session.plantationName, -1, nil)
-            sqlite3_bind_double(statement, 4, session.latitude)
-            sqlite3_bind_double(statement, 5, session.longitude)
-            sqlite3_bind_double(statement, 6, session.createdAt.timeIntervalSince1970)
-            sqlite3_bind_double(statement, 7, session.updatedAt.timeIntervalSince1970)
+            let idString = session.id.uuidString
+            let qrCodeId = session.qrCodeId
+            let plantationName = session.plantationName
 
-            if sqlite3_step(statement) != SQLITE_DONE {
-                print("Erreur sauvegarde session: \(String(cString: sqlite3_errmsg(db)))")
+            idString.withCString { idCString in
+                qrCodeId.withCString { qrIdCString in
+                    plantationName.withCString { nameCString in
+                        sqlite3_bind_text(statement, 1, idCString, -1, nil)
+                        sqlite3_bind_text(statement, 2, qrIdCString, -1, nil)
+                        sqlite3_bind_text(statement, 3, nameCString, -1, nil)
+                        sqlite3_bind_double(statement, 4, session.latitude)
+                        sqlite3_bind_double(statement, 5, session.longitude)
+                        sqlite3_bind_double(statement, 6, session.createdAt.timeIntervalSince1970)
+                        sqlite3_bind_double(statement, 7, session.updatedAt.timeIntervalSince1970)
+
+                        if sqlite3_step(statement) == SQLITE_DONE {
+                            print("✅ [DB] Session sauvegardée avec succès!")
+                        } else {
+                            print("❌ [DB] Erreur sauvegarde session: \(String(cString: sqlite3_errmsg(self.db)))")
+                        }
+                    }
+                }
             }
+        } else {
+            print("❌ [DB] Erreur préparation SQL: \(String(cString: sqlite3_errmsg(db)))")
         }
         sqlite3_finalize(statement)
     }
 
     /// Récupère une session par QR Code ID
     func getSession(forQRCodeId qrCodeId: String) -> PlantSession? {
+        print("🔍 [DB] getSession() appelé pour QR ID: '\(qrCodeId)'")
+
         let sql = "SELECT id, qr_code_id, plantation_name, latitude, longitude, created_at, updated_at FROM sessions WHERE qr_code_id = ?;"
 
         var statement: OpaquePointer?
         var session: PlantSession?
 
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, qrCodeId, -1, nil)
+            qrCodeId.withCString { qrIdCString in
+                sqlite3_bind_text(statement, 1, qrIdCString, -1, nil)
 
-            if sqlite3_step(statement) == SQLITE_ROW {
-                let idString = String(cString: sqlite3_column_text(statement, 0))
-                let qrId = String(cString: sqlite3_column_text(statement, 1))
-                let name = String(cString: sqlite3_column_text(statement, 2))
-                let lat = sqlite3_column_double(statement, 3)
-                let lon = sqlite3_column_double(statement, 4)
-                let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
-                let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+                if sqlite3_step(statement) == SQLITE_ROW {
+                    let idString = String(cString: sqlite3_column_text(statement, 0))
+                    let qrId = String(cString: sqlite3_column_text(statement, 1))
+                    let name = String(cString: sqlite3_column_text(statement, 2))
+                    let lat = sqlite3_column_double(statement, 3)
+                    let lon = sqlite3_column_double(statement, 4)
+                    let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
+                    let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
 
-                // Récupérer les points associés
-                let points = getPoints(forQRCodeId: qrId)
+                    print("✅ [DB] Session trouvée: '\(name)' (QR ID: '\(qrId)')")
 
-                session = PlantSession(
-                    id: UUID(uuidString: idString) ?? UUID(),
-                    qrCodeId: qrId,
-                    plantationName: name,
-                    latitude: lat,
-                    longitude: lon,
-                    createdAt: createdAt,
-                    updatedAt: updatedAt,
-                    points: points
-                )
+                    // Récupérer les points associés
+                    let points = getPoints(forQRCodeId: qrId)
+                    print("📊 [DB] Points récupérés: \(points.count)")
+
+                    session = PlantSession(
+                        id: UUID(uuidString: idString) ?? UUID(),
+                        qrCodeId: qrId,
+                        plantationName: name,
+                        latitude: lat,
+                        longitude: lon,
+                        createdAt: createdAt,
+                        updatedAt: updatedAt,
+                        points: points
+                    )
+                } else {
+                    print("⚠️ [DB] Aucune session trouvée pour QR ID: '\(qrCodeId)'")
+                }
             }
+        } else {
+            print("❌ [DB] Erreur préparation SQL: \(String(cString: sqlite3_errmsg(db)))")
         }
         sqlite3_finalize(statement)
         return session
@@ -204,6 +231,8 @@ final class DatabaseManager {
 
     /// Ajoute un point à une session
     func addPoint(_ point: SavedPlantPoint, toSessionWithQRCodeId qrCodeId: String) {
+        print("💾 [DB] addPoint() appelé - QR ID: '\(qrCodeId)', Point: \(point.nom)")
+
         let sql = """
         INSERT INTO points (session_qr_code_id, point_number, nom, relative_x, relative_y, relative_z, distance_from_previous, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?);
@@ -211,23 +240,36 @@ final class DatabaseManager {
 
         var statement: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, qrCodeId, -1, nil)
-            sqlite3_bind_int(statement, 2, Int32(point.id))
-            sqlite3_bind_text(statement, 3, point.nom, -1, nil)
-            sqlite3_bind_double(statement, 4, Double(point.relativeX))
-            sqlite3_bind_double(statement, 5, Double(point.relativeY))
-            sqlite3_bind_double(statement, 6, Double(point.relativeZ))
-            sqlite3_bind_double(statement, 7, Double(point.distanceFromPrevious))
-            sqlite3_bind_double(statement, 8, point.timestamp.timeIntervalSince1970)
+            // Utiliser withCString pour éviter les problèmes de mémoire
+            qrCodeId.withCString { qrIdCString in
+                point.nom.withCString { nomCString in
+                    sqlite3_bind_text(statement, 1, qrIdCString, -1, nil)
+                    sqlite3_bind_int(statement, 2, Int32(point.id))
+                    sqlite3_bind_text(statement, 3, nomCString, -1, nil)
+                    sqlite3_bind_double(statement, 4, Double(point.relativeX))
+                    sqlite3_bind_double(statement, 5, Double(point.relativeY))
+                    sqlite3_bind_double(statement, 6, Double(point.relativeZ))
+                    sqlite3_bind_double(statement, 7, Double(point.distanceFromPrevious))
+                    sqlite3_bind_double(statement, 8, point.timestamp.timeIntervalSince1970)
 
-            if sqlite3_step(statement) != SQLITE_DONE {
-                print("Erreur ajout point: \(String(cString: sqlite3_errmsg(db)))")
+                    if sqlite3_step(statement) == SQLITE_DONE {
+                        print("✅ [DB] Point sauvegardé avec succès!")
+                    } else {
+                        print("❌ [DB] Erreur ajout point: \(String(cString: sqlite3_errmsg(self.db)))")
+                    }
+                }
             }
+        } else {
+            print("❌ [DB] Erreur préparation SQL: \(String(cString: sqlite3_errmsg(db)))")
         }
         sqlite3_finalize(statement)
 
         // Mettre à jour le timestamp de la session
         updateSessionTimestamp(forQRCodeId: qrCodeId)
+
+        // Vérification: compter les points après insertion
+        let count = getPoints(forQRCodeId: qrCodeId).count
+        print("📊 [DB] Nombre de points pour '\(qrCodeId)' après insertion: \(count)")
     }
 
     /// Récupère tous les points d'une session
@@ -238,27 +280,29 @@ final class DatabaseManager {
         var points: [SavedPlantPoint] = []
 
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, qrCodeId, -1, nil)
+            qrCodeId.withCString { qrIdCString in
+                sqlite3_bind_text(statement, 1, qrIdCString, -1, nil)
 
-            while sqlite3_step(statement) == SQLITE_ROW {
-                let pointNumber = Int(sqlite3_column_int(statement, 0))
-                let nom = String(cString: sqlite3_column_text(statement, 1))
-                let relX = Float(sqlite3_column_double(statement, 2))
-                let relY = Float(sqlite3_column_double(statement, 3))
-                let relZ = Float(sqlite3_column_double(statement, 4))
-                let distance = Float(sqlite3_column_double(statement, 5))
-                let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    let pointNumber = Int(sqlite3_column_int(statement, 0))
+                    let nom = String(cString: sqlite3_column_text(statement, 1))
+                    let relX = Float(sqlite3_column_double(statement, 2))
+                    let relY = Float(sqlite3_column_double(statement, 3))
+                    let relZ = Float(sqlite3_column_double(statement, 4))
+                    let distance = Float(sqlite3_column_double(statement, 5))
+                    let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
 
-                let point = SavedPlantPoint(
-                    id: pointNumber,
-                    nom: nom,
-                    relativeX: relX,
-                    relativeY: relY,
-                    relativeZ: relZ,
-                    distanceFromPrevious: distance,
-                    timestamp: timestamp
-                )
-                points.append(point)
+                    let point = SavedPlantPoint(
+                        id: pointNumber,
+                        nom: nom,
+                        relativeX: relX,
+                        relativeY: relY,
+                        relativeZ: relZ,
+                        distanceFromPrevious: distance,
+                        timestamp: timestamp
+                    )
+                    points.append(point)
+                }
             }
         }
         sqlite3_finalize(statement)

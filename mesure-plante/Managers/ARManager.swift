@@ -1,8 +1,9 @@
 import ARKit
 import SceneKit
 import Combine
+import Vision
 
-/// Gestionnaire principal de la session ARKit avec support QR Code comme ancre
+/// Gestionnaire principal de la session ARKit avec détection automatique de QR Code
 final class ARManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var distance: Float = 0.0
@@ -12,6 +13,7 @@ final class ARManager: NSObject, ObservableObject {
     @Published var statusMessage: String = "Initialisation..."
     @Published var qrCodeDetected: Bool = false
     @Published var hasExistingData: Bool = false
+    @Published var isSearchingQRCode: Bool = true
 
     // MARK: - AR Properties
     private(set) var sceneView: ARSCNView!
@@ -25,14 +27,24 @@ final class ARManager: NSObject, ObservableObject {
     private var currentSession: PlantSession?
     private var qrData: QRCodeData?
 
+    // MARK: - Vision Properties
+    private var visionRequests: [VNRequest] = []
+    private var isProcessingFrame: Bool = false
+    private var lastQRCodeDetectionTime: Date = .distantPast
+    private let qrCodeDetectionInterval: TimeInterval = 0.3 // Scan toutes les 0.3s
+
+    // MARK: - QR Code Visual Marker
+    private var qrCodeMarkerNode: SCNNode?
+
     // MARK: - Configuration
     private let sphereRadius: CGFloat = 0.05
     private let sphereColor = UIColor.systemGreen
-    private let restoredSphereColor = UIColor.systemBlue // Points restaurés en bleu
+    private let restoredSphereColor = UIColor.systemBlue
 
     override init() {
         super.init()
         setupSceneView()
+        setupVision()
     }
 
     // MARK: - Setup
@@ -45,23 +57,43 @@ final class ARManager: NSObject, ObservableObject {
         sceneView.debugOptions = [.showFeaturePoints]
     }
 
+    /// Configure Vision pour la détection de QR Code
+    private func setupVision() {
+        let barcodeRequest = VNDetectBarcodesRequest { [weak self] request, error in
+            self?.handleBarcodeDetection(request: request, error: error)
+        }
+        barcodeRequest.symbologies = [.qr]
+        visionRequests = [barcodeRequest]
+    }
+
     /// Configure avec les données du QR Code
     func configure(with qrData: QRCodeData) {
         self.qrData = qrData
 
+        print("🔍 [ARManager] Configuration avec QR Code ID: '\(qrData.id)', nom: '\(qrData.nom)'")
+
         // Vérifier s'il existe des données sauvegardées pour ce QR Code
         if let existingSession = DataManager.shared.getSession(forQRCodeId: qrData.id) {
+            print("✅ [ARManager] Session existante trouvée!")
+            print("   - Points sauvegardés: \(existingSession.points.count)")
+            for (index, point) in existingSession.points.enumerated() {
+                print("   - Point \(index + 1): \(point.nom) à (\(point.relativeX), \(point.relativeY), \(point.relativeZ))")
+            }
+
             self.currentSession = existingSession
             self.hasExistingData = !existingSession.points.isEmpty
             self.pointCounter = existingSession.points.count
             statusMessage = "Données existantes: \(existingSession.pointCount) points"
         } else {
+            print("⚠️ [ARManager] Aucune session existante - création nouvelle session")
             // Créer une nouvelle session
             self.currentSession = PlantSession(qrData: qrData)
             DataManager.shared.saveSession(self.currentSession!)
             self.hasExistingData = false
             statusMessage = "Nouvelle session créée"
         }
+
+        print("📊 [ARManager] hasExistingData = \(hasExistingData), pointCounter = \(pointCounter)")
     }
 
     /// Démarre la session AR
@@ -71,7 +103,8 @@ final class ARManager: NSObject, ObservableObject {
         configuration.environmentTexturing = .automatic
 
         sceneView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
-        statusMessage = "Scannez le QR Code pour calibrer..."
+        isSearchingQRCode = true
+        statusMessage = "Recherche du QR Code..."
     }
 
     /// Met en pause la session AR
@@ -79,24 +112,116 @@ final class ARManager: NSObject, ObservableObject {
         sceneView.session.pause()
     }
 
-    /// Appelé quand le QR Code est détecté visuellement (depuis la caméra)
-    func setQRCodeAsOrigin() {
-        // Si la position caméra n'est pas encore disponible, réessayer après un court délai
-        guard let currentPosition = getCurrentCameraPosition(),
-              let currentTransform = getCurrentCameraTransform() else {
-            statusMessage = "Initialisation de la caméra..."
-            // Réessayer après 0.3 secondes
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.setQRCodeAsOrigin()
-            }
-            return
-        }
+    // MARK: - QR Code Detection with Vision
 
-        // Le QR Code est devant la caméra, on utilise la position actuelle comme référence
-        qrCodeWorldPosition = currentPosition
-        qrCodeWorldTransform = currentTransform
-        referencePosition = currentPosition
+    /// Traite un frame pour détecter les QR codes
+    private func processFrameForQRCode() {
+        guard isSearchingQRCode,
+              !isProcessingFrame,
+              Date().timeIntervalSince(lastQRCodeDetectionTime) > qrCodeDetectionInterval,
+              let frame = sceneView.session.currentFrame else { return }
+
+        isProcessingFrame = true
+        lastQRCodeDetectionTime = Date()
+
+        let pixelBuffer = frame.capturedImage
+
+        let imageRequestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try imageRequestHandler.perform(self?.visionRequests ?? [])
+            } catch {
+                print("Erreur Vision: \(error)")
+            }
+            DispatchQueue.main.async {
+                self?.isProcessingFrame = false
+            }
+        }
+    }
+
+    /// Gère la détection de codes-barres par Vision
+    private func handleBarcodeDetection(request: VNRequest, error: Error?) {
+        guard let results = request.results as? [VNBarcodeObservation],
+              let qrData = self.qrData else { return }
+
+        for barcode in results {
+            guard let payload = barcode.payloadStringValue else { continue }
+
+            // Vérifier si c'est le bon QR code (même ID)
+            if let scannedData = QRCodeData.from(jsonString: payload),
+               scannedData.id == qrData.id {
+
+                // Calculer la position 3D du QR code
+                DispatchQueue.main.async { [weak self] in
+                    self?.calibrateWithDetectedQRCode(boundingBox: barcode.boundingBox)
+                }
+                return
+            }
+        }
+    }
+
+    /// Calibre avec le QR code détecté
+    private func calibrateWithDetectedQRCode(boundingBox: CGRect) {
+        guard let frame = sceneView.session.currentFrame,
+              !qrCodeDetected else { return }
+
+        // Convertir le boundingBox (coordonnées Vision) en point central (coordonnées écran)
+        let viewSize = sceneView.bounds.size
+
+        // Vision utilise un système de coordonnées normalisé (0-1) avec origine en bas à gauche
+        // On doit le convertir en coordonnées écran
+        let centerX = boundingBox.midX * viewSize.width
+        let centerY = (1 - boundingBox.midY) * viewSize.height
+        let screenPoint = CGPoint(x: centerX, y: centerY)
+
+        // Faire un raycast pour trouver la position 3D
+        if let query = sceneView.raycastQuery(from: screenPoint, allowing: .estimatedPlane, alignment: .any),
+           let result = sceneView.session.raycast(query).first {
+
+            // Position 3D du QR code
+            let qrPosition = SIMD3<Float>(
+                result.worldTransform.columns.3.x,
+                result.worldTransform.columns.3.y,
+                result.worldTransform.columns.3.z
+            )
+
+            setQRCodeOrigin(at: qrPosition, transform: result.worldTransform)
+
+        } else {
+            // Fallback: utiliser une estimation basée sur la distance
+            // Estimer que le QR code est à environ 0.5m devant la caméra
+            let cameraTransform = frame.camera.transform
+            let cameraPosition = SIMD3<Float>(
+                cameraTransform.columns.3.x,
+                cameraTransform.columns.3.y,
+                cameraTransform.columns.3.z
+            )
+
+            // Direction de la caméra (vers l'avant)
+            let cameraForward = SIMD3<Float>(
+                -cameraTransform.columns.2.x,
+                -cameraTransform.columns.2.y,
+                -cameraTransform.columns.2.z
+            )
+
+            // Position estimée du QR code (0.5m devant)
+            let estimatedQRPosition = cameraPosition + (cameraForward * 0.5)
+
+            setQRCodeOrigin(at: estimatedQRPosition, transform: cameraTransform)
+        }
+    }
+
+    /// Définit l'origine au QR code détecté
+    private func setQRCodeOrigin(at position: SIMD3<Float>, transform: simd_float4x4) {
+        qrCodeWorldPosition = position
+        qrCodeWorldTransform = transform
+        referencePosition = position
         qrCodeDetected = true
+        isSearchingQRCode = false
+
+        // Ajouter un marqueur visuel à la position du QR code
+        addQRCodeMarker(at: position)
 
         // Si on a des points existants, les restaurer
         if hasExistingData {
@@ -104,8 +229,70 @@ final class ARManager: NSObject, ObservableObject {
         }
 
         isReady = true
-        statusMessage = "QR Code calibré. Prêt à placer des points."
+        statusMessage = "QR Code détecté! Prêt à placer des points."
         HapticManager.shared.success()
+    }
+
+    /// Ajoute un marqueur visuel à la position du QR code
+    private func addQRCodeMarker(at position: SIMD3<Float>) {
+        // Supprimer l'ancien marqueur si existant
+        qrCodeMarkerNode?.removeFromParentNode()
+
+        // Créer un marqueur pour visualiser la position du QR code
+        let markerGeometry = SCNBox(width: 0.1, height: 0.005, length: 0.1, chamferRadius: 0.01)
+        markerGeometry.firstMaterial?.diffuse.contents = UIColor.systemYellow.withAlphaComponent(0.8)
+        markerGeometry.firstMaterial?.emission.contents = UIColor.systemYellow.withAlphaComponent(0.3)
+
+        let markerNode = SCNNode(geometry: markerGeometry)
+        markerNode.position = SCNVector3(position.x, position.y, position.z)
+
+        // Ajouter un label "QR"
+        let textGeometry = SCNText(string: "QR", extrusionDepth: 0.01)
+        textGeometry.font = UIFont.systemFont(ofSize: 0.05, weight: .bold)
+        textGeometry.firstMaterial?.diffuse.contents = UIColor.white
+
+        let textNode = SCNNode(geometry: textGeometry)
+        textNode.scale = SCNVector3(0.5, 0.5, 0.5)
+        textNode.position = SCNVector3(-0.02, 0.02, 0)
+
+        let billboardConstraint = SCNBillboardConstraint()
+        billboardConstraint.freeAxes = .Y
+        textNode.constraints = [billboardConstraint]
+
+        markerNode.addChildNode(textNode)
+
+        sceneView.scene.rootNode.addChildNode(markerNode)
+        qrCodeMarkerNode = markerNode
+    }
+
+    /// Appelé manuellement pour forcer la calibration (fallback)
+    func forceCalibration() {
+        guard let currentPosition = getCurrentCameraPosition(),
+              let currentTransform = getCurrentCameraTransform() else {
+            statusMessage = "Position caméra non disponible"
+            return
+        }
+
+        setQRCodeOrigin(at: currentPosition, transform: currentTransform)
+    }
+
+    /// Réinitialise pour une nouvelle recherche de QR code
+    func resetCalibration() {
+        qrCodeDetected = false
+        isSearchingQRCode = true
+        isReady = false
+        qrCodeMarkerNode?.removeFromParentNode()
+        qrCodeMarkerNode = nil
+
+        // Supprimer les points affichés (mais pas les données sauvegardées)
+        placedPoints.removeAll()
+
+        // Recharger les données existantes
+        if let qrData = qrData {
+            configure(with: qrData)
+        }
+
+        statusMessage = "Recherche du QR Code..."
     }
 
     /// Restaure les points sauvegardés dans l'espace AR
@@ -153,6 +340,11 @@ final class ARManager: NSObject, ObservableObject {
         // Calculer la position RELATIVE au QR Code
         let relativePosition = currentPosition - qrPosition
 
+        print("📍 [ARManager] Placement point:")
+        print("   - Position caméra: \(currentPosition)")
+        print("   - Position QR: \(qrPosition)")
+        print("   - Position RELATIVE: \(relativePosition)")
+
         // Créer l'anchor
         let transform = matrix_identity_float4x4.translated(by: currentPosition)
         let anchor = ARAnchor(name: "PlantPoint_\(pointCounter + 1)", transform: transform)
@@ -176,7 +368,10 @@ final class ARManager: NSObject, ObservableObject {
 
         // Sauvegarder directement dans SQLite
         if let qrId = qrData?.id {
+            print("💾 [ARManager] Sauvegarde point dans SQLite pour QR ID: '\(qrId)'")
             DataManager.shared.addPoint(toSessionWithQRCodeId: qrId, point: savedPoint)
+        } else {
+            print("❌ [ARManager] ERREUR: qrData?.id est nil!")
         }
 
         // Ce point devient la nouvelle référence
@@ -277,6 +472,9 @@ extension ARManager: ARSCNViewDelegate {
     }
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        // Scanner pour les QR codes pendant la recherche
+        processFrameForQRCode()
+
         guard let currentPosition = getCurrentCameraPosition(),
               let reference = referencePosition else { return }
 
@@ -326,8 +524,9 @@ extension ARManager: ARSessionDelegate {
 
     func sessionInterruptionEnded(_ session: ARSession) {
         DispatchQueue.main.async {
-            self.statusMessage = "Session reprise - Recalibrez le QR Code"
+            self.statusMessage = "Session reprise - Recherche du QR Code..."
             self.qrCodeDetected = false
+            self.isSearchingQRCode = true
             self.isReady = false
         }
     }

@@ -8,13 +8,17 @@ struct ARMeasureView: View {
     @State private var showToast = false
     @State private var toastMessage = ""
     @State private var showPointsList = false
-    @State private var showCalibrationPrompt = true
 
     var body: some View {
         ZStack {
             // Vue AR
             ARSceneViewRepresentable(arManager: arManager)
                 .ignoresSafeArea()
+
+            // Overlay de recherche QR Code (automatique)
+            if arManager.isSearchingQRCode && !arManager.qrCodeDetected {
+                searchingOverlay
+            }
 
             // HUD Overlay (seulement si calibré)
             if arManager.qrCodeDetected {
@@ -28,11 +32,6 @@ struct ARMeasureView: View {
                     )
                     Spacer()
                 }
-            }
-
-            // Écran de calibration QR Code
-            if showCalibrationPrompt && !arManager.qrCodeDetected {
-                calibrationOverlay
             }
 
             // Boutons en bas (seulement si calibré)
@@ -57,26 +56,42 @@ struct ARMeasureView: View {
         }
     }
 
-    // MARK: - Calibration Overlay
+    // MARK: - Searching Overlay (Automatic QR Detection)
 
-    private var calibrationOverlay: some View {
+    private var searchingOverlay: some View {
         ZStack {
-            // Fond semi-transparent pour visibilité
-            Color.black.opacity(0.7)
+            // Fond semi-transparent
+            Color.black.opacity(0.6)
                 .ignoresSafeArea()
 
             VStack(spacing: 24) {
                 Spacer()
 
                 VStack(spacing: 20) {
-                    // Icône
-                    Image(systemName: "qrcode.viewfinder")
-                        .font(.system(size: 60))
-                        .foregroundStyle(.green)
+                    // Animation de recherche
+                    ZStack {
+                        // Cercle extérieur animé
+                        Circle()
+                            .stroke(Color.green.opacity(0.3), lineWidth: 4)
+                            .frame(width: 100, height: 100)
+
+                        // Cercle rotatif
+                        Circle()
+                            .trim(from: 0, to: 0.3)
+                            .stroke(Color.green, lineWidth: 4)
+                            .frame(width: 100, height: 100)
+                            .rotationEffect(.degrees(arManager.isSearchingQRCode ? 360 : 0))
+                            .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: arManager.isSearchingQRCode)
+
+                        // Icône QR
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.green)
+                    }
 
                     // Titre
                     VStack(spacing: 8) {
-                        Text("Calibration requise")
+                        Text("Recherche automatique")
                             .font(.title2)
                             .fontWeight(.bold)
 
@@ -91,7 +106,7 @@ struct ARMeasureView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(.blue)
-                            Text("\(arManager.savedPointsCount) points sauvegardés seront restaurés")
+                            Text("\(arManager.savedPointsCount) points seront restaurés")
                                 .font(.caption)
                         }
                         .padding(.horizontal, 16)
@@ -100,22 +115,25 @@ struct ARMeasureView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
 
-                    // Bouton calibrer
-                    Button(action: calibrateQRCode) {
-                        HStack(spacing: 12) {
+                    // Bouton calibration manuelle (fallback)
+                    Button(action: {
+                        arManager.forceCalibration()
+                    }) {
+                        HStack(spacing: 8) {
                             Image(systemName: "scope")
-                            Text("Calibrer maintenant")
-                                .fontWeight(.semibold)
+                            Text("Calibrer manuellement")
+                                .fontWeight(.medium)
                         }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 32)
-                        .padding(.vertical, 16)
-                        .background(Color.green)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.8))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.white.opacity(0.2))
                         .clipShape(Capsule())
                     }
                     .padding(.top, 8)
 
-                    Text("Appuyez quand le QR Code est bien visible")
+                    Text("Le QR code sera détecté automatiquement")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -137,7 +155,9 @@ struct ARMeasureView: View {
 
             HStack(spacing: 16) {
                 // Bouton recalibrer
-                Button(action: { showCalibrationPrompt = true; resetCalibration() }) {
+                Button(action: {
+                    arManager.resetCalibration()
+                }) {
                     Image(systemName: "arrow.counterclockwise")
                         .font(.title2)
                         .foregroundStyle(.white)
@@ -214,24 +234,6 @@ struct ARMeasureView: View {
         return qrData.nom
     }
 
-    private func calibrateQRCode() {
-        arManager.setQRCodeAsOrigin()
-        showCalibrationPrompt = false
-
-        // Afficher message si points restaurés
-        if arManager.hasExistingData {
-            toastMessage = "\(arManager.placedPoints.count) points restaurés"
-            showToast = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                showToast = false
-            }
-        }
-    }
-
-    private func resetCalibration() {
-        // Réinitialiser pour permettre une nouvelle calibration
-    }
-
     private func placePoint() {
         let previousCount = arManager.placedPoints.count
         arManager.placePoint()
@@ -301,6 +303,13 @@ struct PointsListView: View {
                                 .fill(Color.blue)
                                 .frame(width: 12, height: 12)
                             Text("Restauré")
+                                .font(.caption)
+                        }
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color.yellow)
+                                .frame(width: 12, height: 12)
+                            Text("QR Code")
                                 .font(.caption)
                         }
                     }
