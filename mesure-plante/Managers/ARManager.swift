@@ -3,7 +3,7 @@ import SceneKit
 import Combine
 import Vision
 
-/// Gestionnaire principal de la session ARKit avec détection automatique de QR Code
+/// Gestionnaire principal de la session ARKit avec détection automatique de QR Code de asso
 final class ARManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var distance: Float = 0.0
@@ -326,7 +326,76 @@ final class ARManager: NSObject, ObservableObject {
         HapticManager.shared.success()
     }
 
-    /// Place un nouveau point à la position actuelle
+    /// Reconstruit tous les points à partir d'un point de référence connu
+    /// Utilisé quand le QR code est perdu mais qu'on reconnaît un arbre existant
+    /// - Parameters:
+    ///   - knownPointId: L'ID du point dont on connaît la position actuelle
+    ///   - currentPosition: La position actuelle de ce point dans l'espace AR
+    func reconstructFromKnownPoint(knownPointId: Int, currentPosition: SIMD3<Float>) {
+        guard let session = currentSession else {
+            statusMessage = "Aucune session active"
+            return
+        }
+
+        print("🔄 [ARManager] Reconstruction depuis point #\(knownPointId)")
+        print("   - Position actuelle: \(currentPosition)")
+
+        // Utiliser la fonction de reconstruction de PlantSession
+        let reconstructedPositions = session.reconstructPositions(
+            fromKnownPointId: knownPointId,
+            knownPosition: currentPosition
+        )
+
+        if reconstructedPositions.isEmpty {
+            statusMessage = "Point #\(knownPointId) non trouvé"
+            return
+        }
+
+        // Supprimer les anciens points affichés
+        placedPoints.removeAll()
+
+        // Recalculer la position du QR code à partir du point connu
+        if let knownSavedPoint = session.points.first(where: { $0.id == knownPointId }) {
+            // Position QR = position connue - position relative au QR
+            qrCodeWorldPosition = currentPosition - knownSavedPoint.relativePosition
+            print("   - Position QR recalculée: \(qrCodeWorldPosition!)")
+        }
+
+        // Afficher tous les points reconstruits
+        for savedPoint in session.points {
+            guard let worldPosition = reconstructedPositions[savedPoint.id] else { continue }
+
+            // Créer un anchor et une sphère
+            let transform = matrix_identity_float4x4.translated(by: worldPosition)
+            let anchor = ARAnchor(name: "ReconstructedPoint_\(savedPoint.id)", transform: transform)
+            sceneView.session.add(anchor: anchor)
+
+            // Ajouter au tableau local
+            let plantPoint = PlantPoint(id: savedPoint.id, anchor: anchor, position: worldPosition)
+            placedPoints.append(plantPoint)
+
+            print("   - Point #\(savedPoint.id) reconstruit à \(worldPosition)")
+        }
+
+        // Mettre à jour l'état
+        pointCounter = session.points.count
+        if let lastPoint = placedPoints.last {
+            referencePosition = lastPoint.position
+        }
+
+        qrCodeDetected = true
+        isReady = true
+        statusMessage = "\(session.points.count) points reconstruits depuis Arbre \(knownPointId)"
+        HapticManager.shared.success()
+    }
+
+    /// Liste des points disponibles pour la reconstruction
+    var availablePointsForReconstruction: [(id: Int, nom: String)] {
+        guard let session = currentSession else { return [] }
+        return session.points.map { (id: $0.id, nom: $0.nom) }
+    }
+
+    /// Place un nouveau point à la position actuelle (avec chaînage)
     func placePoint() {
         guard let currentPosition = getCurrentCameraPosition(),
               let qrPosition = qrCodeWorldPosition else {
@@ -334,16 +403,32 @@ final class ARManager: NSObject, ObservableObject {
             return
         }
 
-        // Calculer la distance depuis la référence
-        let distanceFromRef = referencePosition.map { simd_distance($0, currentPosition) } ?? 0
-
         // Calculer la position RELATIVE au QR Code
-        let relativePosition = currentPosition - qrPosition
+        let relativeToQR = currentPosition - qrPosition
 
-        print("📍 [ARManager] Placement point:")
+        // Calculer la position RELATIVE au point PRÉCÉDENT (chaînage)
+        let previousPointId: Int
+        let relativeToPrevious: SIMD3<Float>
+        let distanceFromPrevious: Float
+
+        if let lastPoint = placedPoints.last {
+            // Il y a un point précédent → chaînage
+            previousPointId = lastPoint.id
+            relativeToPrevious = currentPosition - lastPoint.position
+            distanceFromPrevious = simd_distance(lastPoint.position, currentPosition)
+        } else {
+            // Premier point → relatif au QR code
+            previousPointId = 0
+            relativeToPrevious = relativeToQR
+            distanceFromPrevious = simd_distance(qrPosition, currentPosition)
+        }
+
+        print("📍 [ARManager] Placement point avec CHAÎNAGE:")
         print("   - Position caméra: \(currentPosition)")
         print("   - Position QR: \(qrPosition)")
-        print("   - Position RELATIVE: \(relativePosition)")
+        print("   - Relatif au QR: \(relativeToQR)")
+        print("   - Relatif au point précédent (#\(previousPointId)): \(relativeToPrevious)")
+        print("   - Distance depuis précédent: \(distanceFromPrevious)m")
 
         // Créer l'anchor
         let transform = matrix_identity_float4x4.translated(by: currentPosition)
@@ -355,12 +440,14 @@ final class ARManager: NSObject, ObservableObject {
         let point = PlantPoint(id: pointCounter, anchor: anchor, position: currentPosition)
         placedPoints.append(point)
 
-        // Sauvegarder dans SQLite
+        // Sauvegarder dans SQLite avec chaînage complet
         let savedPoint = SavedPlantPoint(
             id: pointCounter,
             nom: "Arbre \(pointCounter)",
-            relativePosition: relativePosition,
-            distanceFromPrevious: distanceFromRef
+            relativeToQR: relativeToQR,
+            relativeToPrevious: relativeToPrevious,
+            previousPointId: previousPointId,
+            distanceFromPrevious: distanceFromPrevious
         )
 
         // Ajouter à la session locale
@@ -368,19 +455,19 @@ final class ARManager: NSObject, ObservableObject {
 
         // Sauvegarder directement dans SQLite
         if let qrId = qrData?.id {
-            print("💾 [ARManager] Sauvegarde point dans SQLite pour QR ID: '\(qrId)'")
+            print("💾 [ARManager] Sauvegarde point chaîné dans SQLite pour QR ID: '\(qrId)'")
             DataManager.shared.addPoint(toSessionWithQRCodeId: qrId, point: savedPoint)
         } else {
             print("❌ [ARManager] ERREUR: qrData?.id est nil!")
         }
 
-        // Ce point devient la nouvelle référence
+        // Ce point devient la nouvelle référence pour la distance affichée
         referencePosition = currentPosition
         distance = 0.0
 
         // Feedback
         HapticManager.shared.success()
-        statusMessage = "Arbre \(pointCounter) placé et sauvegardé"
+        statusMessage = "Arbre \(pointCounter) placé et chaîné"
     }
 
     /// Récupère la position actuelle de la caméra

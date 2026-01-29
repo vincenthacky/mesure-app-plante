@@ -1,12 +1,12 @@
 import Foundation
 import SQLite3
 
-/// Gestionnaire de base de données SQLite
+/// Gestionnaire de base de données SQLite avec support du chaînage
 final class DatabaseManager {
     static let shared = DatabaseManager()
 
     private var db: OpaquePointer?
-    private let dbName = "mesure_plante.sqlite"
+    private let dbName = "mesure_plante_v2.sqlite" // Nouvelle version avec chaînage
 
     private var dbURL: URL {
         let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -26,9 +26,9 @@ final class DatabaseManager {
 
     private func openDatabase() {
         if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
-            print("Erreur ouverture base de données: \(String(cString: sqlite3_errmsg(db)))")
+            print("❌ [DB] Erreur ouverture base de données: \(String(cString: sqlite3_errmsg(db)))")
         } else {
-            print("Base de données ouverte: \(dbURL.path)")
+            print("✅ [DB] Base de données ouverte: \(dbURL.path)")
         }
     }
 
@@ -46,7 +46,7 @@ final class DatabaseManager {
         );
         """
 
-        // Table des points
+        // Table des points avec chaînage complet
         let createPointsTable = """
         CREATE TABLE IF NOT EXISTS points (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,6 +56,10 @@ final class DatabaseManager {
             relative_x REAL NOT NULL,
             relative_y REAL NOT NULL,
             relative_z REAL NOT NULL,
+            relative_to_prev_x REAL NOT NULL DEFAULT 0,
+            relative_to_prev_y REAL NOT NULL DEFAULT 0,
+            relative_to_prev_z REAL NOT NULL DEFAULT 0,
+            previous_point_id INTEGER NOT NULL DEFAULT 0,
             distance_from_previous REAL NOT NULL,
             timestamp REAL NOT NULL,
             FOREIGN KEY (session_qr_code_id) REFERENCES sessions(qr_code_id) ON DELETE CASCADE
@@ -76,10 +80,10 @@ final class DatabaseManager {
         var statement: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
             if sqlite3_step(statement) != SQLITE_DONE {
-                print("Erreur exécution SQL: \(String(cString: sqlite3_errmsg(db)))")
+                print("❌ [DB] Erreur exécution SQL: \(String(cString: sqlite3_errmsg(db)))")
             }
         } else {
-            print("Erreur préparation SQL: \(String(cString: sqlite3_errmsg(db)))")
+            print("❌ [DB] Erreur préparation SQL: \(String(cString: sqlite3_errmsg(db)))")
         }
         sqlite3_finalize(statement)
     }
@@ -221,26 +225,32 @@ final class DatabaseManager {
         var statement: OpaquePointer?
 
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, qrCodeId, -1, nil)
-            sqlite3_step(statement)
+            qrCodeId.withCString { qrIdCString in
+                sqlite3_bind_text(statement, 1, qrIdCString, -1, nil)
+                sqlite3_step(statement)
+            }
         }
         sqlite3_finalize(statement)
     }
 
     // MARK: - Points CRUD
 
-    /// Ajoute un point à une session
+    /// Ajoute un point à une session (avec chaînage complet)
     func addPoint(_ point: SavedPlantPoint, toSessionWithQRCodeId qrCodeId: String) {
         print("💾 [DB] addPoint() appelé - QR ID: '\(qrCodeId)', Point: \(point.nom)")
+        print("   📍 Relatif QR: (\(point.relativeX), \(point.relativeY), \(point.relativeZ))")
+        print("   🔗 Relatif précédent: (\(point.relativeToPreviousX), \(point.relativeToPreviousY), \(point.relativeToPreviousZ))")
+        print("   ⬅️ Point précédent ID: \(point.previousPointId)")
 
         let sql = """
-        INSERT INTO points (session_qr_code_id, point_number, nom, relative_x, relative_y, relative_z, distance_from_previous, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO points (session_qr_code_id, point_number, nom, relative_x, relative_y, relative_z,
+                           relative_to_prev_x, relative_to_prev_y, relative_to_prev_z, previous_point_id,
+                           distance_from_previous, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
 
         var statement: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            // Utiliser withCString pour éviter les problèmes de mémoire
             qrCodeId.withCString { qrIdCString in
                 point.nom.withCString { nomCString in
                     sqlite3_bind_text(statement, 1, qrIdCString, -1, nil)
@@ -249,11 +259,15 @@ final class DatabaseManager {
                     sqlite3_bind_double(statement, 4, Double(point.relativeX))
                     sqlite3_bind_double(statement, 5, Double(point.relativeY))
                     sqlite3_bind_double(statement, 6, Double(point.relativeZ))
-                    sqlite3_bind_double(statement, 7, Double(point.distanceFromPrevious))
-                    sqlite3_bind_double(statement, 8, point.timestamp.timeIntervalSince1970)
+                    sqlite3_bind_double(statement, 7, Double(point.relativeToPreviousX))
+                    sqlite3_bind_double(statement, 8, Double(point.relativeToPreviousY))
+                    sqlite3_bind_double(statement, 9, Double(point.relativeToPreviousZ))
+                    sqlite3_bind_int(statement, 10, Int32(point.previousPointId))
+                    sqlite3_bind_double(statement, 11, Double(point.distanceFromPrevious))
+                    sqlite3_bind_double(statement, 12, point.timestamp.timeIntervalSince1970)
 
                     if sqlite3_step(statement) == SQLITE_DONE {
-                        print("✅ [DB] Point sauvegardé avec succès!")
+                        print("✅ [DB] Point sauvegardé avec chaînage!")
                     } else {
                         print("❌ [DB] Erreur ajout point: \(String(cString: sqlite3_errmsg(self.db)))")
                     }
@@ -272,9 +286,14 @@ final class DatabaseManager {
         print("📊 [DB] Nombre de points pour '\(qrCodeId)' après insertion: \(count)")
     }
 
-    /// Récupère tous les points d'une session
+    /// Récupère tous les points d'une session (avec chaînage)
     func getPoints(forQRCodeId qrCodeId: String) -> [SavedPlantPoint] {
-        let sql = "SELECT point_number, nom, relative_x, relative_y, relative_z, distance_from_previous, timestamp FROM points WHERE session_qr_code_id = ? ORDER BY point_number ASC;"
+        let sql = """
+        SELECT point_number, nom, relative_x, relative_y, relative_z,
+               relative_to_prev_x, relative_to_prev_y, relative_to_prev_z, previous_point_id,
+               distance_from_previous, timestamp
+        FROM points WHERE session_qr_code_id = ? ORDER BY point_number ASC;
+        """
 
         var statement: OpaquePointer?
         var points: [SavedPlantPoint] = []
@@ -289,8 +308,12 @@ final class DatabaseManager {
                     let relX = Float(sqlite3_column_double(statement, 2))
                     let relY = Float(sqlite3_column_double(statement, 3))
                     let relZ = Float(sqlite3_column_double(statement, 4))
-                    let distance = Float(sqlite3_column_double(statement, 5))
-                    let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+                    let relToPrevX = Float(sqlite3_column_double(statement, 5))
+                    let relToPrevY = Float(sqlite3_column_double(statement, 6))
+                    let relToPrevZ = Float(sqlite3_column_double(statement, 7))
+                    let prevPointId = Int(sqlite3_column_int(statement, 8))
+                    let distance = Float(sqlite3_column_double(statement, 9))
+                    let timestamp = Date(timeIntervalSince1970: sqlite3_column_double(statement, 10))
 
                     let point = SavedPlantPoint(
                         id: pointNumber,
@@ -298,6 +321,10 @@ final class DatabaseManager {
                         relativeX: relX,
                         relativeY: relY,
                         relativeZ: relZ,
+                        relativeToPreviousX: relToPrevX,
+                        relativeToPreviousY: relToPrevY,
+                        relativeToPreviousZ: relToPrevZ,
+                        previousPointId: prevPointId,
                         distanceFromPrevious: distance,
                         timestamp: timestamp
                     )
@@ -315,8 +342,10 @@ final class DatabaseManager {
         var statement: OpaquePointer?
 
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_text(statement, 1, qrCodeId, -1, nil)
-            sqlite3_step(statement)
+            qrCodeId.withCString { qrIdCString in
+                sqlite3_bind_text(statement, 1, qrIdCString, -1, nil)
+                sqlite3_step(statement)
+            }
         }
         sqlite3_finalize(statement)
     }
@@ -327,9 +356,11 @@ final class DatabaseManager {
         var statement: OpaquePointer?
 
         if sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK {
-            sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
-            sqlite3_bind_text(statement, 2, qrCodeId, -1, nil)
-            sqlite3_step(statement)
+            qrCodeId.withCString { qrIdCString in
+                sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
+                sqlite3_bind_text(statement, 2, qrIdCString, -1, nil)
+                sqlite3_step(statement)
+            }
         }
         sqlite3_finalize(statement)
     }
